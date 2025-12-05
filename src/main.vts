@@ -1,0 +1,25 @@
+// VoltTS v0.1 sample
+// Goal:
+//   - TS-like readability
+//   - small language surface
+//   - native-first via C output
+//   - explicit nullability
+//   - Result-based error handling
+
+import { fs, log, time } from "std"
+import { logHelper } from "./support/log_helper.vts"
+
+export async fn main() {
+    log.info("booting VoltTS prototype (async demo)")
+    print("unix epoch (ms):")
+    await time.now()
+    log.warn("demo sleep (await)")
+    await time.sleep(20)
+    await logHelper()
+    log.info("writing sample file")
+    await fs.writeFile("sample.txt", "hello from VoltTS async")
+    log.info("reading sample file")
+    await fs.readFile("sample.txt")
+    log.info("demo done")
+    log.error("demo complete")
+}
