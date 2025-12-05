@@ -1,0 +1,9 @@
+import { log, time } from "std"
+
+async fn main(): int {
+    log.info("std log/time demo start")
+    await time.now()
+    await time.sleep(5)
+    log.warn("std log/time demo end")
+    return 0
+}

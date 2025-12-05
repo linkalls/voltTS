@@ -79,6 +79,22 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn stmt_contains_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::ReturnInt(_) => true,
+        Stmt::If {
+            condition: _,
+            then_branch,
+            else_branch,
+        } => then_branch.iter().any(stmt_contains_return)
+            || else_branch.iter().any(stmt_contains_return),
+        Stmt::While { body, .. } => body.iter().any(stmt_contains_return),
+        Stmt::ForRange { body, .. } => body.iter().any(stmt_contains_return),
+        Stmt::Await(inner) => stmt_contains_return(inner),
+        _ => false,
+    }
+}
+
 fn handle_init(root: PathBuf) -> Result<()> {
     fs::create_dir_all(root.join("src"))
         .with_context(|| format!("failed to create src directory under {}", root.display()))?;
@@ -178,6 +194,7 @@ fn handle_fmt(path: PathBuf, check: bool) -> Result<()> {
     let source =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let program = parse_program(&source)?;
+    type_check(&program)?;
     let formatted = format_program(&program);
 
     if check {
@@ -197,7 +214,8 @@ fn handle_fmt(path: PathBuf, check: bool) -> Result<()> {
 fn handle_lint(path: PathBuf) -> Result<()> {
     let source =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    parse_program(&source)?;
+    let program = parse_program(&source)?;
+    type_check(&program)?;
     println!("{} linted successfully", path.display());
     Ok(())
 }
@@ -205,6 +223,7 @@ fn handle_lint(path: PathBuf) -> Result<()> {
 fn handle_build(entry: PathBuf, c_out: PathBuf, bin_out: PathBuf) -> Result<PathBuf> {
     ensure_entry_exists(&entry)?;
     let program = load_program(&entry)?;
+    type_check(&program)?;
     let c_code = codegen_c(&program, &entry);
 
     if let Some(parent) = c_out.parent() {
@@ -267,9 +286,36 @@ struct Program {
 #[derive(Debug, Clone)]
 struct Function {
     name: String,
-    return_type: Option<String>,
-    body: Vec<Stmt>,
+    return_type: Option<TypeAnnotation>,
+    body: Vec<Spanned<Stmt>>,
     is_async: bool,
+    #[allow(dead_code)]
+    line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeAnnotation {
+    Int,
+    String,
+    Void,
+    Unknown(String),
+}
+
+impl TypeAnnotation {
+    fn as_str(&self) -> &str {
+        match self {
+            TypeAnnotation::Int => "int",
+            TypeAnnotation::String => "string",
+            TypeAnnotation::Void => "void",
+            TypeAnnotation::Unknown(raw) => raw.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Spanned<T> {
+    value: T,
+    line: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,21 +336,41 @@ enum Stmt {
     FsWriteFile { path: String, contents: String },
     Call(String),
     Await(Box<Stmt>),
+    If {
+        condition: Condition,
+        then_branch: Vec<Stmt>,
+        else_branch: Vec<Stmt>,
+    },
+    While {
+        condition: Condition,
+        body: Vec<Stmt>,
+    },
+    ForRange {
+        var: String,
+        start: i32,
+        end: i32,
+        body: Vec<Stmt>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum Condition {
+    BoolLiteral(bool),
 }
 
 fn parse_program(source: &str) -> Result<Program> {
-    let mut lines = source.lines().peekable();
+    let mut lines = source.lines().enumerate().peekable();
     let mut imports = Vec::new();
     let mut functions = Vec::new();
 
-    while let Some(line) = lines.next() {
+    while let Some((line_number, line)) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
 
         if trimmed.starts_with("import ") {
-            imports.push(parse_import(trimmed)?);
+            imports.push(parse_import(trimmed, line_number + 1)?);
             continue;
         }
 
@@ -314,19 +380,19 @@ fn parse_program(source: &str) -> Result<Program> {
             || trimmed.starts_with("async fn")
         {
             let signature = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-            let (name, return_type, is_async) = parse_signature(signature)?;
+            let (name, return_type, is_async) = parse_signature(signature, line_number + 1)?;
 
             let mut body = Vec::new();
             // consume until '{'
             if !signature.contains('{') {
-                while let Some(next) = lines.next() {
+                while let Some((_, next)) = lines.next() {
                     if next.contains('{') {
                         break;
                     }
                 }
             }
 
-            for body_line in &mut lines {
+            for (body_idx, body_line) in &mut lines {
                 let body_trimmed = body_line.trim();
                 if body_trimmed.starts_with('}') {
                     break;
@@ -334,7 +400,10 @@ fn parse_program(source: &str) -> Result<Program> {
                 if body_trimmed.is_empty() || body_trimmed.starts_with("//") {
                     continue;
                 }
-                body.push(parse_stmt(body_trimmed)?);
+                body.push(Spanned {
+                    value: parse_stmt(body_trimmed)?,
+                    line: body_idx + 1,
+                });
             }
 
             functions.push(Function {
@@ -342,6 +411,7 @@ fn parse_program(source: &str) -> Result<Program> {
                 return_type,
                 body,
                 is_async,
+                line: line_number + 1,
             });
         }
     }
@@ -351,6 +421,63 @@ fn parse_program(source: &str) -> Result<Program> {
     }
 
     Ok(Program { imports, functions })
+}
+
+fn type_check(program: &Program) -> Result<()> {
+    for func in &program.functions {
+        if func.name == "main" {
+            match func.return_type {
+                Some(TypeAnnotation::Int) | Some(TypeAnnotation::Void) => {}
+                Some(ref other) => {
+                    return Err(anyhow!(
+                        "行 {}: main は戻り値型として int もしくは void を明示してください (指定: {})",
+                        func.line,
+                        other.as_str()
+                    ))
+                }
+                None => {
+                    return Err(anyhow!(
+                        "行 {}: main は戻り値型として int もしくは void を明示してください",
+                        func.line
+                    ))
+                }
+            }
+        }
+
+        let declared = func
+            .return_type
+            .as_ref()
+            .cloned()
+            .unwrap_or(TypeAnnotation::Void);
+        let expected = declared;
+
+        let mut saw_return = false;
+        for stmt in &func.body {
+            if stmt_contains_return(&stmt.value) {
+                saw_return = true;
+                if !matches!(expected, TypeAnnotation::Int) {
+                    return Err(anyhow!(
+                        "行 {}: 関数 {} は {} を返すべきなのに、int を返しています",
+                        stmt.line,
+                        func.name,
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+
+        if func.name != "main"
+            && matches!(expected, TypeAnnotation::Int)
+            && !saw_return
+        {
+            return Err(anyhow!(
+                "行 {}: 関数 {} は int を返す必要がありますが、return が見つかりません",
+                func.line, func.name
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn load_program(entry: &PathBuf) -> Result<Program> {
@@ -391,19 +518,27 @@ fn load_program_recursive(path: &PathBuf, visited: &mut HashSet<PathBuf>) -> Res
     Ok(program)
 }
 
-fn parse_import(line: &str) -> Result<Import> {
+fn parse_import(line: &str, line_number: usize) -> Result<Import> {
     let without_suffix = line.trim().trim_end_matches(';').trim();
     let without_prefix = without_suffix
         .strip_prefix("import")
-        .ok_or_else(|| anyhow!("invalid import syntax: {}", line))?
+        .ok_or_else(|| anyhow!("invalid import syntax at line {}: {}", line_number, line))?
         .trim();
 
-    let (names_part, rest) = without_prefix
-        .split_once('}')
-        .ok_or_else(|| anyhow!("import must include a closing brace ('}}'): {}", line))?;
-    let names_block = names_part
-        .strip_prefix('{')
-        .ok_or_else(|| anyhow!("import must start with '{{': {}", line))?;
+    let (names_part, rest) = without_prefix.split_once('}').ok_or_else(|| {
+        anyhow!(
+            "import must include a closing brace ('}}') at line {}: {}",
+            line_number,
+            line
+        )
+    })?;
+    let names_block = names_part.strip_prefix('{').ok_or_else(|| {
+        anyhow!(
+            "import must start with '{{' at line {}: {}",
+            line_number,
+            line
+        )
+    })?;
     let names: Vec<String> = names_block
         .split(',')
         .map(|n| n.trim())
@@ -412,25 +547,36 @@ fn parse_import(line: &str) -> Result<Import> {
         .collect();
 
     if names.is_empty() {
-        return Err(anyhow!("import must list at least one name: {}", line));
+        return Err(anyhow!(
+            "import must list at least one name at line {}: {}",
+            line_number,
+            line
+        ));
     }
 
     let module = rest
         .trim()
         .strip_prefix("from")
-        .ok_or_else(|| anyhow!("import missing 'from': {}", line))?
+        .ok_or_else(|| anyhow!("import missing 'from' at line {}: {}", line_number, line))?
         .trim()
         .trim_matches('"')
         .to_string();
 
     if module.is_empty() {
-        return Err(anyhow!("import module path is empty: {}", line));
+        return Err(anyhow!(
+            "import module path is empty at line {}: {}",
+            line_number,
+            line
+        ));
     }
 
     Ok(Import { names, module })
 }
 
-fn parse_signature(signature: &str) -> Result<(String, Option<String>, bool)> {
+fn parse_signature(
+    signature: &str,
+    line_number: usize,
+) -> Result<(String, Option<TypeAnnotation>, bool)> {
     // signature like: fn main(): int {
     let mut without_prefix = signature.trim_start_matches("export").trim();
     let mut is_async = false;
@@ -442,7 +588,11 @@ fn parse_signature(signature: &str) -> Result<(String, Option<String>, bool)> {
 
     let name_and_rest: Vec<&str> = without_prefix.splitn(2, '(').collect();
     if name_and_rest.len() < 2 {
-        return Err(anyhow!("invalid function signature: {}", signature));
+        return Err(anyhow!(
+            "invalid function signature at line {}: {}",
+            line_number,
+            signature
+        ));
     }
     let name = name_and_rest[0].trim().to_string();
 
@@ -453,13 +603,28 @@ fn parse_signature(signature: &str) -> Result<(String, Option<String>, bool)> {
         if rt.is_empty() {
             None
         } else {
-            Some(rt.to_string())
+            Some(parse_type_annotation(rt, line_number))
         }
     } else {
         None
     };
 
     Ok((name, return_type, is_async))
+}
+
+fn parse_type_annotation(raw: &str, line_number: usize) -> TypeAnnotation {
+    match raw {
+        "int" => TypeAnnotation::Int,
+        "string" => TypeAnnotation::String,
+        "void" => TypeAnnotation::Void,
+        other => {
+            eprintln!(
+                "warning: 未知の型 '{}' (行 {}) を見つけました。Unknown type will be treated as opaque.",
+                other, line_number
+            );
+            TypeAnnotation::Unknown(other.to_string())
+        }
+    }
 }
 
 fn parse_stmt(line: &str) -> Result<Stmt> {
@@ -473,6 +638,67 @@ fn parse_stmt(line: &str) -> Result<Stmt> {
 }
 
 fn parse_stmt_core(trimmed: &str) -> Result<Stmt> {
+    if let Some(rest) = trimmed.strip_prefix("if ") {
+        let (cond_raw, branches_raw) = rest
+            .split_once('{')
+            .ok_or_else(|| anyhow!("if 文は {{ が必要です: {}", trimmed))?;
+        let condition = parse_condition(cond_raw.trim())?;
+        let (then_raw, else_raw) = branches_raw
+            .rsplit_once("} else {")
+            .map(|(then_part, else_part)| (then_part, Some(else_part)))
+            .unwrap_or((branches_raw, None));
+        let then_branch = parse_inline_block(then_raw.trim_end_matches('}').trim())?;
+        let else_branch = if let Some(raw) = else_raw {
+            parse_inline_block(raw.trim_end_matches('}').trim())?
+        } else {
+            Vec::new()
+        };
+
+        return Ok(Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        });
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("while ") {
+        let (cond_raw, body_raw) = rest
+            .split_once('{')
+            .ok_or_else(|| anyhow!("while 文は {{ が必要です: {}", trimmed))?;
+        let condition = parse_condition(cond_raw.trim())?;
+        let body = parse_inline_block(body_raw.trim_end_matches('}').trim())?;
+        return Ok(Stmt::While { condition, body });
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("for ") {
+        let (head, body_raw) = rest
+            .split_once('{')
+            .ok_or_else(|| anyhow!("for 文は {{ が必要です: {}", trimmed))?;
+        let (var_part, range_part) = head
+            .trim()
+            .split_once(" in ")
+            .ok_or_else(|| anyhow!("for 文は 'for <var> in <start>..<end>' 形式です: {}", head))?;
+        let var = var_part.trim().to_string();
+        let (start_raw, end_raw) = range_part
+            .split_once("..")
+            .ok_or_else(|| anyhow!("for の range は start..end 形式です: {}", range_part))?;
+        let start = start_raw
+            .trim()
+            .parse::<i32>()
+            .context("for range start は整数である必要があります")?;
+        let end = end_raw
+            .trim()
+            .parse::<i32>()
+            .context("for range end は整数である必要があります")?;
+        let body = parse_inline_block(body_raw.trim_end_matches('}').trim())?;
+        return Ok(Stmt::ForRange {
+            var,
+            start,
+            end,
+            body,
+        });
+    }
+
     if trimmed.starts_with("print(") && trimmed.ends_with(')') {
         let inner = trimmed.trim_start_matches("print(").trim_end_matches(')');
         let text = inner
@@ -569,6 +795,30 @@ fn parse_stmt_core(trimmed: &str) -> Result<Stmt> {
     Err(anyhow!("unsupported statement: {}", trimmed))
 }
 
+fn parse_condition(raw: &str) -> Result<Condition> {
+    match raw.trim() {
+        "true" => Ok(Condition::BoolLiteral(true)),
+        "false" => Ok(Condition::BoolLiteral(false)),
+        other => Err(anyhow!("条件式がサポートされていません: {}", other)),
+    }
+}
+
+fn parse_inline_block(raw: &str) -> Result<Vec<Stmt>> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmts = Vec::new();
+    for part in raw.split(';') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        stmts.push(parse_stmt_core(trimmed)?);
+    }
+    Ok(stmts)
+}
+
 fn emit_stmt(
     out: &mut String,
     stmt: &Stmt,
@@ -577,6 +827,7 @@ fn emit_stmt(
     in_main: bool,
     returns_int: bool,
 ) {
+    let mut saw_return = saw_return;
     match stmt {
         Stmt::Await(inner) => emit_stmt(out, inner, temp_counter, saw_return, in_main, returns_int),
         Stmt::Print(text) => {
@@ -611,11 +862,7 @@ fn emit_stmt(
                 tmp,
                 path.replace('"', "\\\"")
             ));
-            let ret = if in_main || returns_int {
-                "return 1;"
-            } else {
-                "return;"
-            };
+            let ret = if returns_int { "return 1;" } else { "return;" };
             out.push_str(&format!(
                 "    if ({0}) {{ printf(\"%s\\n\", {0}); free({0}); }} else {{ fprintf(stderr, \"[fs.readFile] failed: {1}\\n\"); {2} }}\n",
                 tmp,
@@ -625,11 +872,7 @@ fn emit_stmt(
             ));
         }
         Stmt::FsWriteFile { path, contents } => {
-            let ret = if in_main || returns_int {
-                "return 1;"
-            } else {
-                "return;"
-            };
+            let ret = if returns_int { "return 1;" } else { "return;" };
             out.push_str(&format!(
                 "    if (vts_fs_write_file(\"{}\", \"{}\") != 0) {{ fprintf(stderr, \"[fs.writeFile] failed: {}\\n\"); {3} }}\n",
                 path.replace('"', "\\\""),
@@ -642,11 +885,86 @@ fn emit_stmt(
             out.push_str(&format!("    {}();\n", name));
         }
         Stmt::ReturnInt(v) => {
-            if let Some(flag) = saw_return {
+            if let Some(flag) = saw_return.as_deref_mut() {
                 *flag = true;
             }
             out.push_str(&format!("    return {};\n", v));
         }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            out.push_str(&format!("    if ({}) {{\n", emit_condition(condition)));
+            for inner in then_branch {
+                emit_stmt(
+                    out,
+                    inner,
+                    temp_counter,
+                    saw_return.as_deref_mut(),
+                    in_main,
+                    returns_int,
+                );
+            }
+            out.push_str("    }\n");
+            if !else_branch.is_empty() {
+                out.push_str("    else {\n");
+                for inner in else_branch {
+                    emit_stmt(
+                        out,
+                        inner,
+                        temp_counter,
+                        saw_return.as_deref_mut(),
+                        in_main,
+                        returns_int,
+                    );
+                }
+                out.push_str("    }\n");
+            }
+        }
+        Stmt::While { condition, body } => {
+            out.push_str(&format!("    while ({}) {{\n", emit_condition(condition)));
+            for inner in body {
+                emit_stmt(
+                    out,
+                    inner,
+                    temp_counter,
+                    saw_return.as_deref_mut(),
+                    in_main,
+                    returns_int,
+                );
+            }
+            out.push_str("    }\n");
+        }
+        Stmt::ForRange {
+            var,
+            start,
+            end,
+            body,
+        } => {
+            out.push_str(&format!(
+                "    for (int {} = {}; {} < {}; {}++) {{\n",
+                var, start, var, end, var
+            ));
+            for inner in body {
+                emit_stmt(
+                    out,
+                    inner,
+                    temp_counter,
+                    saw_return.as_deref_mut(),
+                    in_main,
+                    returns_int,
+                );
+            }
+            out.push_str("    }\n");
+        }
+    }
+}
+
+fn emit_condition(condition: &Condition) -> String {
+    match condition {
+        Condition::BoolLiteral(true) => "1".to_string(),
+        Condition::BoolLiteral(false) => "0".to_string(),
     }
 }
 
@@ -686,12 +1004,8 @@ fn codegen_c(program: &Program, source_path: &Path) -> String {
 
     out.push_str("// --- user prototypes ---\n");
     for func in &program.functions {
-        let returns_int = func
-            .return_type
-            .as_deref()
-            .map(|rt| rt == "int")
-            .unwrap_or(false)
-            || func.name == "main";
+        let is_main = func.name == "main";
+        let returns_int = is_main || matches!(func.return_type, Some(TypeAnnotation::Int));
         let c_return = if returns_int { "int" } else { "void" };
         out.push_str(&format!("{} {}(void);\n", c_return, func.name));
     }
@@ -699,36 +1013,33 @@ fn codegen_c(program: &Program, source_path: &Path) -> String {
 
     for func in &program.functions {
         let mut temp_counter = 0;
-        if func.name == "main" {
-            out.push_str("int main(void) {\n");
+        let is_main = func.name == "main";
+        let returns_int = is_main || matches!(func.return_type, Some(TypeAnnotation::Int));
+        if is_main {
+            out.push_str(&format!("{} main(void) {{\n", if returns_int { "int" } else { "void" }));
             let mut saw_return = false;
             for stmt in &func.body {
                 emit_stmt(
                     &mut out,
-                    stmt,
+                    &stmt.value,
                     &mut temp_counter,
                     Some(&mut saw_return),
-                    true,
-                    true,
+                    returns_int,
+                    returns_int,
                 );
             }
-            if !saw_return {
+            if returns_int && !saw_return {
                 out.push_str("    return 0;\n");
             }
             out.push_str("}\n\n");
         } else {
-            let returns_int = func
-                .return_type
-                .as_deref()
-                .map(|rt| rt == "int")
-                .unwrap_or(false);
             let c_return = if returns_int { "int" } else { "void" };
             out.push_str(&format!("{} {}(void) {{\n", c_return, func.name));
             let mut saw_return = false;
             for stmt in &func.body {
                 emit_stmt(
                     &mut out,
-                    stmt,
+                    &stmt.value,
                     &mut temp_counter,
                     if returns_int {
                         Some(&mut saw_return)
@@ -741,7 +1052,7 @@ fn codegen_c(program: &Program, source_path: &Path) -> String {
             }
             if returns_int && !saw_return {
                 out.push_str("    return 0;\n");
-            } else if func.return_type.is_none() {
+            } else if matches!(func.return_type, Some(TypeAnnotation::Void) | None) {
                 out.push_str("    return;\n");
             }
             out.push_str("}\n\n");
@@ -768,11 +1079,15 @@ fn format_program(program: &Program) -> String {
     for func in &program.functions {
         let async_prefix = if func.is_async { "async " } else { "" };
         match &func.return_type {
-            Some(rt) => out.push_str(&format!("{async_prefix}fn {}(): {} {{\n", func.name, rt)),
+            Some(rt) => out.push_str(&format!(
+                "{async_prefix}fn {}(): {} {{\n",
+                func.name,
+                rt.as_str()
+            )),
             None => out.push_str(&format!("{async_prefix}fn {}() {{\n", func.name)),
         }
         for stmt in &func.body {
-            match stmt {
+            match &stmt.value {
                 Stmt::Await(inner) => {
                     out.push_str("    await ");
                     match **inner {
@@ -804,7 +1119,48 @@ fn format_program(program: &Program) -> String {
                         }
                         Stmt::ReturnInt(v) => out.push_str(&format!("return {}\n", v)),
                         Stmt::Await(_) => unreachable!("nested await handled earlier"),
+                        Stmt::If { .. } | Stmt::While { .. } | Stmt::ForRange { .. } => {
+                            out.push_str("/* unsupported await nesting */\n")
+                        }
                     }
+                }
+                Stmt::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    out.push_str(&format!(
+                        "    if {} {{ {} }}",
+                        format_condition(condition),
+                        format_block_inline(then_branch)
+                    ));
+                    if !else_branch.is_empty() {
+                        out.push_str(" else { ");
+                        out.push_str(&format_block_inline(else_branch));
+                        out.push_str(" }");
+                    }
+                    out.push('\n');
+                }
+                Stmt::While { condition, body } => {
+                    out.push_str(&format!(
+                        "    while {} {{ {} }}\n",
+                        format_condition(condition),
+                        format_block_inline(body)
+                    ));
+                }
+                Stmt::ForRange {
+                    var,
+                    start,
+                    end,
+                    body,
+                } => {
+                    out.push_str(&format!(
+                        "    for {} in {}..{} {{ {} }}\n",
+                        var,
+                        start,
+                        end,
+                        format_block_inline(body)
+                    ));
                 }
                 Stmt::Print(text) => out.push_str(&format!("    print(\"{}\")\n", text)),
                 Stmt::Log { level, message } => {
@@ -836,7 +1192,6 @@ fn format_program(program: &Program) -> String {
     }
     out
 }
-
 const SAMPLE_MAIN: &str = r#"// VoltTS v0.1 sample
 // Goal:
 //   - TS-like readability
@@ -864,6 +1219,74 @@ export async fn main() {
 }
 "#;
 
+fn format_condition(cond: &Condition) -> String {
+    match cond {
+        Condition::BoolLiteral(true) => "true".to_string(),
+        Condition::BoolLiteral(false) => "false".to_string(),
+    }
+}
+
+fn format_block_inline(stmts: &[Stmt]) -> String {
+    stmts
+        .iter()
+        .map(|s| match s {
+            Stmt::Print(text) => format!("print(\"{}\")", text),
+            Stmt::Log { level, message } => {
+                let level = match level {
+                    LogLevel::Info => "info",
+                    LogLevel::Warn => "warn",
+                    LogLevel::Error => "error",
+                };
+                format!("log.{}(\"{}\")", level, message)
+            }
+            Stmt::SleepMs(ms) => format!("time.sleep({})", ms),
+            Stmt::TimeNow => "time.now()".to_string(),
+            Stmt::FsReadFile { path } => format!("fs.readFile(\"{}\")", path),
+            Stmt::FsWriteFile { path, contents } => {
+                format!("fs.writeFile(\"{}\", \"{}\")", path, contents)
+            }
+            Stmt::Call(name) => format!("{}()", name),
+            Stmt::ReturnInt(v) => format!("return {}", v),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let mut rendered = format!(
+                    "if {} {{ {} }}",
+                    format_condition(condition),
+                    format_block_inline(then_branch)
+                );
+                if !else_branch.is_empty() {
+                    rendered.push_str(" else { ");
+                    rendered.push_str(&format_block_inline(else_branch));
+                    rendered.push_str(" }");
+                }
+                rendered
+            }
+            Stmt::While { condition, body } => format!(
+                "while {} {{ {} }}",
+                format_condition(condition),
+                format_block_inline(body)
+            ),
+            Stmt::ForRange {
+                var,
+                start,
+                end,
+                body,
+            } => format!(
+                "for {} in {}..{} {{ {} }}",
+                var,
+                start,
+                end,
+                format_block_inline(body)
+            ),
+            Stmt::Await(inner) => format!("await {}", format_block_inline(&[*inner.clone()])),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 const SAMPLE_HELPER: &str = r#"import { log, time } from "std"
 
 export async fn logHelper() {
@@ -872,3 +1295,59 @@ export async fn logHelper() {
     log.warn("helper end")
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn int_function_requires_explicit_return() {
+        let src = r#"
+fn foo(): int {
+    log.info("missing return")
+}
+"#;
+        let program = parse_program(src).expect("parse program");
+        let err = type_check(&program).expect_err("type check should fail");
+        assert!(
+            err.to_string().contains("return"),
+            "expected missing return diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn main_requires_annotation() {
+        let src = r#"
+fn main() {
+    print("ok")
+}
+"#;
+        let program = parse_program(src).expect("parse program");
+        let err = type_check(&program).expect_err("main without type should fail");
+        assert!(err
+            .to_string()
+            .contains("main は戻り値型として int もしくは void を明示してください"));
+    }
+
+    #[test]
+    fn main_with_int_annotation_can_omit_return() {
+        let src = r#"
+fn main(): int {
+    print("ok")
+}
+"#;
+        let program = parse_program(src).expect("parse program");
+        type_check(&program).expect("main with int annotation can omit return");
+    }
+
+    #[test]
+    fn main_with_void_annotation_compiles() {
+        let src = r#"
+fn main(): void {
+    print("ok")
+}
+"#;
+        let program = parse_program(src).expect("parse program");
+        type_check(&program).expect("main with void annotation is allowed");
+    }
+}

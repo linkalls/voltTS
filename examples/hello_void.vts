@@ -1,0 +1,4 @@
+// main は void 戻り値でも OK のデモ
+fn main(): void {
+    print("hello (void)")
+}

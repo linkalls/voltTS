@@ -9,7 +9,7 @@
 import { fs, log, time } from "std"
 import { logHelper } from "./support/log_helper.vts"
 
-export async fn main() {
+export async fn main(): int {
     log.info("booting VoltTS prototype (async demo)")
     print("unix epoch (ms):")
     await time.now()
@@ -22,4 +22,5 @@ export async fn main() {
     await fs.readFile("sample.txt")
     log.info("demo done")
     log.error("demo complete")
+    return 0
 }

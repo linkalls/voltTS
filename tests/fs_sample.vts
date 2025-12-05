@@ -1,9 +1,10 @@
 // VoltTS fs demo for integration testing
 import { fs, log } from "std"
 
-async fn main() {
+async fn main(): int {
     log.info("fs demo start")
     await fs.writeFile("tmp_fs.txt", "hello fs runtime")
     await fs.readFile("tmp_fs.txt")
     log.info("fs demo end")
+    return 0
 }

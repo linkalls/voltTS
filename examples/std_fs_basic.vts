@@ -1,0 +1,9 @@
+import { fs, log } from "std"
+
+async fn main(): int {
+    log.info("std fs demo start")
+    await fs.writeFile("dist/examples/std_fs_basic.txt", "fs demo payload")
+    await fs.readFile("dist/examples/std_fs_basic.txt")
+    log.info("std fs demo end")
+    return 0
+}

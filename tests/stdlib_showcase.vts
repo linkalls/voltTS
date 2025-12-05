@@ -2,11 +2,12 @@
 import { fs, log, time } from "std"
 import { helperStep } from "./helpers/helper.vts"
 
-export async fn main() {
+export async fn main(): int {
     log.info("stdlib showcase start")
     await helperStep()
     await fs.writeFile("tmp_stdlib.txt", "showcase payload")
     await fs.readFile("tmp_stdlib.txt")
     await time.sleep(5)
     log.warn("stdlib showcase done")
+    return 0
 }

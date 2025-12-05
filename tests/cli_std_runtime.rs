@@ -90,3 +90,105 @@ fn fs_runtime_writes_and_reads_files() {
         let _ = fs::remove_file(tmp_path);
     }
 }
+
+#[test]
+fn std_log_and_time_example_runs() {
+    let _guard = BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock poisoned");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist = manifest_dir.join("dist");
+    if dist.exists() {
+        let _ = fs::remove_dir_all(&dist);
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_voltts"));
+    cmd.current_dir(&manifest_dir)
+        .arg("run")
+        .arg("examples/std_log_time.vts");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("std log/time demo start"))
+        .stdout(predicate::str::contains("std log/time demo end"));
+}
+
+#[test]
+fn std_fs_example_runs() {
+    let _guard = BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock poisoned");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist = manifest_dir.join("dist");
+    if dist.exists() {
+        let _ = fs::remove_dir_all(&dist);
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_voltts"));
+    cmd.current_dir(&manifest_dir)
+        .arg("run")
+        .arg("examples/std_fs_basic.vts");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("std fs demo start"))
+        .stdout(predicate::str::contains("std fs demo end"));
+
+    let tmp_path = manifest_dir.join("dist/examples/std_fs_basic.txt");
+    if tmp_path.exists() {
+        let _ = fs::remove_file(tmp_path);
+    }
+}
+
+#[test]
+fn control_flow_constructs_emit_expected_output() {
+    let _guard = BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock poisoned");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist = manifest_dir.join("dist");
+    if dist.exists() {
+        let _ = fs::remove_dir_all(&dist);
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_voltts"));
+    cmd.current_dir(&manifest_dir)
+        .arg("run")
+        .arg("examples/control_flow.vts");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("control flow start"))
+        .stdout(predicate::str::contains("[info] if/else hit"))
+        .stdout(predicate::str::contains("[info] range loop"))
+        .stdout(predicate::str::contains("control flow end"));
+}
+
+#[test]
+fn void_main_example_runs() {
+    let _guard = BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock poisoned");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist = manifest_dir.join("dist");
+    if dist.exists() {
+        let _ = fs::remove_dir_all(&dist);
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_voltts"));
+    cmd.current_dir(&manifest_dir)
+        .arg("run")
+        .arg("examples/hello_void.vts");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("hello (void)"));
+}

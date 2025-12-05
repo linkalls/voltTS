@@ -1,0 +1,12 @@
+fn main(): int {
+  print("control flow start");
+  if true { log.info("if/else hit") } else { log.warn("no-op") }
+  let_loop();
+  print("control flow end");
+  return 0;
+}
+
+fn let_loop() {
+  for i in 0..3 { log.info("range loop") }
+  while false { log.error("should not happen") }
+}
