@@ -2,6 +2,8 @@
 
 VoltTS の開発で参照するツール/実装メモです。Bun の体験をインスピレーションとして扱いますが、リポジトリの実装は Rust 製 CLI (`voltts`) を中心に進めます。Bun は参考例にとどめ、テストは Rust 側で完結させます。
 
+> 更新: Node.js ではなく Bun を明示的に使う最小スモークを実装しました。`bun test` 経由で CLI の `--help` を叩く例を `tests/bun/cli_smoke.test.ts` に追加し、手順を `docs/bun-smoke-tests.md` にまとめています。
+
 > メモ: JS 側でスモークを書く場合は Node.js ではなく **Bun**（例: `bun test`）を使う方針。現状は Rust の統合テストのみで賄っているため、JS テストを足す場合は Bun ベースの最小ランナーから検討する。
 
 ## Bun をどう使うか

@@ -1,6 +1,7 @@
 import { log } from "std"
 
-fn main() {
+fn main(): int {
     print("Hello, VoltTS!")
     log.info("example finished")
+    return 0
 }

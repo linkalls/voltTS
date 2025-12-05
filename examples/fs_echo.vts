@@ -1,8 +1,9 @@
 import { fs, log } from "std"
 
-fn main() {
+fn main(): int {
     log.info("fs example start")
     fs.writeFile("dist/examples/tmp_fs_demo.txt", "VoltTS FS example")
     fs.readFile("dist/examples/tmp_fs_demo.txt")
     log.info("fs example done")
+    return 0
 }
