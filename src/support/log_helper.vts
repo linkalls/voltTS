@@ -1,0 +1,7 @@
+import { log, time } from "std"
+
+export async fn logHelper() {
+    log.info("helper start")
+    await time.sleep(10)
+    log.warn("helper end")
+}
