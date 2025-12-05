@@ -1,0 +1,7 @@
+import { log, time } from "std"
+
+export async fn helperStep() {
+    log.info("helper tick")
+    await time.now()
+    log.error("helper finished")
+}
