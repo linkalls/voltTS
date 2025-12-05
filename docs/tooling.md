@@ -25,3 +25,8 @@ VoltTS の開発で参照するツール/実装メモです。Bun の体験を�
 - **Rust 出力にすると？** `.vts` から生成された Rust コードを最終的に `rustc`/`cargo` でビルドする必要があるため、「コンパイラをビルドして配布すればユーザー環境はそれだけで済む」という状態にはならない。Rust ツールチェーン（標準ライブラリ、ターゲットごとの sysroot など）の配布が別途必要で、クロスコンパイル設定も増える。
 - **C 出力の利点**: `cc` による単純なネイティブビルドで完結し、最小限の依存で済む。`libc` 相当があれば多くのプラットフォームでそのまま動かせる。
 - **Rust 出力を選ぶ場合の対応**: 生成 Rust のビルドを `voltts` がラップする実装は可能だが、Rustup/クロスツールチェーンを同梱する必要があるため、現状は C 出力をデフォルトとし、Rust バックエンドは将来のオプションとして検討する。
+
+## 実装メモ（2025-02 現在）
+- `src/` を責務別に分割（`cli.rs`、`parser.rs`、`formatter.rs`、`codegen.rs`、`diagnostics.rs`、`ast.rs`）。エントリポイントは `main.rs` で Clap のハンドラを呼び分けるだけの薄い構造に整理。
+- パーサは `VoltError` + `SourceLocation` を返し、`line/col` 情報付きでエラーメッセージを出す。CLI では `anyhow` にブリッジしてそのまま表示。
+- 標準ランタイム（log/time/fs）の C 埋め込み部分は `codegen.rs` でまとめて生成。`log.info/log.warn/log.error`、`time.now/time.sleep`、`fs.readFile/fs.writeFile` を最小構成でサポート。
